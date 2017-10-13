@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# FIXME: (jany) This file should be part of the builder?
 
 from __future__ import (print_function, division, absolute_import,
                         unicode_literals)
@@ -21,7 +22,8 @@ import logging
 import os
 import xml.etree.ElementTree as etree
 
-from glyphsLib.builder.ufo import set_custom_params, build_stylemap_names
+from glyphsLib.builder.font import set_custom_params,\
+                                   build_stylemap_names
 from glyphsLib.builder.constants import GLYPHS_PREFIX
 
 from glyphsLib.util import build_ufo_path, write_ufo, clean_ufo, clear_data

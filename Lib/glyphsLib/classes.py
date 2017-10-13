@@ -580,6 +580,8 @@ class FontClassesProxy(Proxy):
                 if klass.name == key:
                     del self.values()[index]
 
+    # FIXME: (jany) def __contains__
+
     def append(self, item):
         self.values().append(item)
         item._parent = self._owner
@@ -2340,9 +2342,9 @@ class GSBackgroundLayer(GSBase):
         "paths": GSPath,
         "visible": bool,
     }
-
-    def shouldWriteValueForKey(self, key):
-        return super(GSBackgroundLayer, self).shouldWriteValueForKey(key)
+    _wrapperKeysTranslate = {
+        "guideLines": "guides",
+    }
 
 
 class GSLayer(GSBase):
