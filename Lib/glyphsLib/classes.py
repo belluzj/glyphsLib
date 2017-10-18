@@ -1170,6 +1170,10 @@ class GSFontMaster(GSBase):
     _wrapperKeysTranslate = {
         "guideLines": "guides",
         "custom": "customName",
+        # FIXME: (jany) Check in Glyphs
+        "custom1": "customName1",
+        "custom2": "customName2",
+        "custom3": "customName3",
     }
     _keyOrder = (
         "alignmentZones",

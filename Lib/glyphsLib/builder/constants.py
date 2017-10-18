@@ -75,3 +75,5 @@ CODEPAGE_RANGES = {
     850: 62,
     437: 63,
 }
+
+REVERSE_CODEPAGE_RANGES = {value: key for key, value in CODEPAGE_RANGES}

@@ -15,18 +15,18 @@
 from __future__ import (print_function, division, absolute_import,
                         unicode_literals)
 
-import re
 from collections import deque, OrderedDict
 import logging
 
-from .constants import PUBLIC_PREFIX, GLYPHS_PREFIX, CODEPAGE_RANGES, \
-                       UFO2FT_FILTERS_KEY
-from glyphsLib.util import clear_data, cast_to_number_or_bool, bin_to_int_list
-from .guidelines import to_ufo_guidelines
-from .common import to_ufo_time
-from .filters import parse_glyphs_filter
-from .names import build_style_name, build_stylemap_names
-from .blue_values import set_blue_values
+from .constants import GLYPHS_PREFIX
+from .guidelines import to_ufo_guidelines, to_glyphs_guidelines
+from .common import to_ufo_time, from_ufo_time
+from .names import to_ufo_names, to_glyphs_names
+from .blue_values import to_ufo_blue_values, to_glyphs_blue_values
+from .user_data import to_ufo_family_user_data, to_ufo_master_user_data, \
+    to_glyphs_family_user_data, to_glyphs_master_user_data
+from .custom_params import to_ufo_custom_params, \
+    to_glyphs_family_custom_params, to_glyphs_master_custom_params
 
 logger = logging.getLogger(__name__)
 
@@ -47,15 +47,11 @@ def to_ufo_font_attributes(context, family_name):
     units_per_em = font.upm
     version_major = font.versionMajor
     version_minor = font.versionMinor
-    user_data = font.userData
     copyright = font.copyright
     designer = font.designer
     designer_url = font.designerURL
     manufacturer = font.manufacturer
     manufacturer_url = font.manufacturerURL
-
-    misc = ['DisplayStrings', 'disablesAutomaticAlignment', 'disablesNiceNames']
-    custom_params = parse_custom_params(font, misc)
 
     for master in font.masters:
         ufo = context.defcon.Font()
@@ -91,220 +87,31 @@ def to_ufo_font_attributes(context, family_name):
             ufo.info.postscriptStemSnapV = vertical_stems
         if italic_angle:
             ufo.info.italicAngle = italic_angle
-            is_italic = True
-        else:
-            is_italic = False
 
         width = master.width
         weight = master.weight
-        custom = master.customName
         if weight:
             ufo.lib[GLYPHS_PREFIX + 'weight'] = weight
         if width:
             ufo.lib[GLYPHS_PREFIX + 'width'] = width
-        if custom:
-            ufo.lib[GLYPHS_PREFIX + 'custom'] = custom
+        for number in ('', '1', '2', '3'):
+            custom_name = getattr(master, 'customName' + number)
+            if custom_name:
+                ufo.lib[GLYPHS_PREFIX + 'customName' + number] = custom_name
+            custom_value = setattr(master, 'customValue' + number)
+            if custom_value:
+                ufo.lib[GLYPHS_PREFIX + 'customValue' + number] = custom_value
 
-        styleName = build_style_name(
-            width if width != 'Regular' else '',
-            weight,
-            custom,
-            is_italic
-        )
-        styleMapFamilyName, styleMapStyleName = build_stylemap_names(
-            family_name=family_name,
-            style_name=styleName,
-            is_bold=(styleName == 'Bold'),
-            is_italic=is_italic
-        )
-        ufo.info.familyName = family_name
-        ufo.info.styleName = styleName
-        ufo.info.styleMapFamilyName = styleMapFamilyName
-        ufo.info.styleMapStyleName = styleMapStyleName
-
-        set_blue_values(ufo, master.alignmentZones)
-        set_family_user_data(ufo, user_data)
-        set_master_user_data(ufo, master.userData)
+        to_ufo_names(context, ufo, master, family_name)
+        to_ufo_blue_values(context, ufo, master)
+        to_ufo_family_user_data(context, ufo)
+        to_ufo_master_user_data(context, ufo, master)
         to_ufo_guidelines(context, ufo, master)
-
-        set_custom_params(ufo, parsed=custom_params)
-        # the misc attributes double as deprecated info attributes!
-        # they are Glyphs-related, not OpenType-related, and don't go in info
-        misc = ('customValue', 'weightValue', 'widthValue')
-        set_custom_params(ufo, data=master, misc_keys=misc, non_info=misc)
-
-        set_default_params(ufo)
+        to_ufo_custom_params(context, ufo, master)
 
         master_id = master.id
         ufo.lib[GLYPHS_PREFIX + 'fontMasterID'] = master_id
         context.ufos[master_id] = ufo
-
-
-def set_custom_params(ufo, parsed=None, data=None, misc_keys=(), non_info=()):
-    """Set Glyphs custom parameters in UFO info or lib, where appropriate.
-
-    Custom parameter data can be pre-parsed out of Glyphs data and provided via
-    the `parsed` argument, otherwise `data` should be provided and will be
-    parsed. The `parsed` option is provided so that custom params can be popped
-    from Glyphs data once and used several times; in general this is used for
-    debugging purposes (to detect unused Glyphs data).
-
-    The `non_info` argument can be used to specify potential UFO info attributes
-    which should not be put in UFO info.
-    """
-
-    if parsed is None:
-        parsed = parse_custom_params(data or {}, misc_keys)
-    else:
-        assert data is None, "Shouldn't provide parsed data and data to parse."
-
-    fsSelection_flags = {'Use Typo Metrics', 'Has WWS Names'}
-    for name, value in parsed:
-        name = normalize_custom_param_name(name)
-
-        if name in fsSelection_flags:
-            if value:
-                if ufo.info.openTypeOS2Selection is None:
-                    ufo.info.openTypeOS2Selection = []
-                if name == 'Use Typo Metrics':
-                    ufo.info.openTypeOS2Selection.append(7)
-                elif name == 'Has WWS Names':
-                    ufo.info.openTypeOS2Selection.append(8)
-            continue
-
-        # deal with any Glyphs naming quirks here
-        if name == 'disablesNiceNames':
-            name = 'useNiceNames'
-            value = int(not value)
-
-        # convert code page numbers to OS/2 ulCodePageRange bits
-        if name == 'codePageRanges':
-            value = [CODEPAGE_RANGES[v] for v in value]
-
-        # convert Glyphs' GASP Table to UFO openTypeGaspRangeRecords
-        if name == 'GASP Table':
-            name = 'openTypeGaspRangeRecords'
-            # XXX maybe the parser should cast the gasp values to int?
-            value = {int(k): int(v) for k, v in value.items()}
-            gasp_records = []
-            # gasp range records must be sorted in ascending rangeMaxPPEM
-            for max_ppem, gasp_behavior in sorted(value.items()):
-                gasp_records.append({
-                    'rangeMaxPPEM': max_ppem,
-                    'rangeGaspBehavior': bin_to_int_list(gasp_behavior)})
-            value = gasp_records
-
-        opentype_attr_prefix_pairs = (
-            ('hhea', 'Hhea'), ('description', 'NameDescription'),
-            ('license', 'NameLicense'),
-            ('licenseURL', 'NameLicenseURL'),
-            ('preferredFamilyName', 'NamePreferredFamilyName'),
-            ('preferredSubfamilyName', 'NamePreferredSubfamilyName'),
-            ('compatibleFullName', 'NameCompatibleFullName'),
-            ('sampleText', 'NameSampleText'),
-            ('WWSFamilyName', 'NameWWSFamilyName'),
-            ('WWSSubfamilyName', 'NameWWSSubfamilyName'),
-            ('panose', 'OS2Panose'),
-            ('typo', 'OS2Typo'), ('unicodeRanges', 'OS2UnicodeRanges'),
-            ('codePageRanges', 'OS2CodePageRanges'),
-            ('weightClass', 'OS2WeightClass'),
-            ('widthClass', 'OS2WidthClass'),
-            ('win', 'OS2Win'), ('vendorID', 'OS2VendorID'),
-            ('versionString', 'NameVersion'), ('fsType', 'OS2Type'))
-        for glyphs_prefix, ufo_prefix in opentype_attr_prefix_pairs:
-            name = re.sub(
-                '^' + glyphs_prefix, 'openType' + ufo_prefix, name)
-
-        postscript_attrs = ('underlinePosition', 'underlineThickness')
-        if name in postscript_attrs:
-            name = 'postscript' + name[0].upper() + name[1:]
-
-        # enforce that winAscent/Descent are positive, according to UFO spec
-        if name.startswith('openTypeOS2Win') and value < 0:
-            value = -value
-
-        # The value of these could be a float, and ufoLib/defcon expect an int.
-        if name in ('openTypeOS2WeightClass', 'openTypeOS2WidthClass'):
-            value = int(value)
-
-        if name == 'glyphOrder':
-            # store the public.glyphOrder in lib.plist
-            ufo.lib[PUBLIC_PREFIX + name] = value
-        elif name == 'Filter':
-            filter_struct = parse_glyphs_filter(value)
-            if not filter_struct:
-                continue
-            if UFO2FT_FILTERS_KEY not in ufo.lib.keys():
-                ufo.lib[UFO2FT_FILTERS_KEY] = []
-            ufo.lib[UFO2FT_FILTERS_KEY].append(filter_struct)
-        elif hasattr(ufo.info, name) and name not in non_info:
-            # most OpenType table entries go in the info object
-            setattr(ufo.info, name, value)
-        else:
-            # everything else gets dumped in the lib
-            ufo.lib[GLYPHS_PREFIX + name] = value
-
-
-def set_default_params(ufo):
-    """ Set Glyphs.app's default parameters when different from ufo2ft ones.
-    """
-    # ufo2ft defaults to fsType Bit 2 ("Preview & Print embedding"), while
-    # Glyphs.app defaults to Bit 3 ("Editable embedding")
-    if ufo.info.openTypeOS2Type is None:
-        ufo.info.openTypeOS2Type = [3]
-
-    # Reference:
-    # https://glyphsapp.com/content/1-get-started/2-manuals/1-handbook-glyphs-2-0/Glyphs-Handbook-2.3.pdf#page=200
-    if ufo.info.postscriptUnderlineThickness is None:
-        ufo.info.postscriptUnderlineThickness = 50
-    if ufo.info.postscriptUnderlinePosition is None:
-        ufo.info.postscriptUnderlinePosition = -100
-
-
-def normalize_custom_param_name(name):
-    """Replace curved quotes with straight quotes in a custom parameter name.
-    These should be the only keys with problematic (non-ascii) characters,
-    since they can be user-generated.
-    """
-
-    replacements = (
-        (u'\u2018', "'"), (u'\u2019', "'"), (u'\u201C', '"'), (u'\u201D', '"'))
-    for orig, replacement in replacements:
-        name = name.replace(orig, replacement)
-    return name
-
-
-def parse_custom_params(font, misc_keys):
-    """Parse customParameters into a list of <name, val> pairs."""
-
-    params = []
-    for p in font.customParameters:
-        params.append((p.name, p.value))
-    for key in misc_keys:
-        try:
-            val = getattr(font, key)
-        except KeyError:
-            continue
-        if val is not None:
-            params.append((key, val))
-    return params
-
-
-def set_family_user_data(ufo, user_data):
-    """Set family-wide user data as Glyphs does."""
-
-    for key in user_data.keys():
-        ufo.lib[key] = user_data[key]
-
-
-def set_master_user_data(ufo, user_data):
-    """Set master-specific user data as Glyphs does."""
-
-    if user_data:
-        data = {}
-        for key in user_data.keys():
-            data[key] = user_data[key]
-        ufo.lib[GLYPHS_PREFIX + 'fontMaster.userData'] = data
 
 
 def to_glyphs_font_attributes(context, ufo, master, is_initial):
@@ -322,5 +129,74 @@ def to_glyphs_font_attributes(context, ufo, master, is_initial):
     #     what we would be writing, to guard against the info being
     #     modified in only one of the UFOs in a MM. Maybe do this check later,
     #     when the roundtrip without modification works.
+    if is_initial:
+        _set_glyphs_font_attributes(context, ufo)
+    else:
+        # _compare_and_merge_glyphs_font_attributes(context, ufo)
+        pass
+    _set_glyphs_master_attributes(context, ufo, master)
+
+
+def _set_glyphs_font_attributes(context, ufo):
+    font = context.font
+    info = ufo.info
+
+    if info.openTypeHeadCreated is not None:
+        # FIXME: (jany) should wrap in glyphs_datetime? or maybe the GSFont
+        #     should wrap in glyphs_datetime if needed?
+        font.date = from_ufo_time(info.opentTypeHeadCreated)
+    font.upm = info.unitsPerEm
+    font.versionMajor = info.versionMajor
+    font.versionMinor = info.versionMinor
+
+    if info.copyright is not None:
+        font.copyright = info.copyright
+    if info.openTypeNameDesigner is not None:
+        font.designer = info.openTypeNameDesigner
+    if info.openTypeNameDesignerURL is not None:
+        font.designerURL = info.openTypeNameDesignerURL
+    if info.openTypeNameManufacturer is not None:
+        font.manufacturer = info.openTypeNameManufacturer
+    if info.openTypeNameManufacturerURL is not None:
+        font.manufacturerURL = info.openTypeNameManufacturerURL
+
+    to_glyphs_family_user_data(context, ufo)
+    to_glyphs_family_custom_params(context, ufo)
+
+
+def _set_glyphs_master_attributes(context, ufo, master):
     master.id = ufo.lib[GLYPHS_PREFIX + 'fontMasterID']
-    # TODO: all the other attributes
+
+    master.ascender = ufo.info.ascender
+    master.capHeight = ufo.info.capHeight
+    master.descender = ufo.info.descender
+    master.xHeight = ufo.info.xHeight
+
+    horizontal_stems = ufo.info.postscriptStemSnapH
+    vertical_stems = ufo.info.postscriptStemSnapV
+    italic_angle = -ufo.info.italicAngle
+    if horizontal_stems:
+        master.horizontalStems = horizontal_stems
+    if vertical_stems:
+        master.verticalStems = vertical_stems
+    if italic_angle:
+        master.italicAngle = italic_angle
+
+    width = ufo.lib[GLYPHS_PREFIX + 'width']
+    weight = ufo.lib[GLYPHS_PREFIX + 'weight']
+    if weight:
+        master.weight = weight
+    if width:
+        master.width = width
+    for number in ('', '1', '2', '3'):
+        custom_name = ufo.lib[GLYPHS_PREFIX + 'customName' + number]
+        if custom_name:
+            setattr(master, 'customName' + number, custom_name)
+        custom_value = ufo.lib[GLYPHS_PREFIX + 'customValue' + number]
+        if custom_value:
+            setattr(master, 'customValue' + number, custom_value)
+
+    to_glyphs_blue_values(context, ufo, master)
+    to_glyphs_master_user_data(context, ufo, master)
+    to_glyphs_guidelines(context, ufo, master)
+    to_glyphs_master_custom_params(context, ufo, master)

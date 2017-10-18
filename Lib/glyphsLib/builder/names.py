@@ -18,6 +18,30 @@ from __future__ import (print_function, division, absolute_import,
 from collections import deque
 
 
+def to_ufo_names(context, ufo, master, family_name):
+    width = master.width
+    weight = master.weight
+    custom = master.customName
+    is_italic = bool(master.italicAngle)
+
+    styleName = build_style_name(
+        width if width != 'Regular' else '',
+        weight,
+        custom,
+        is_italic
+    )
+    styleMapFamilyName, styleMapStyleName = build_stylemap_names(
+        family_name=family_name,
+        style_name=styleName,
+        is_bold=(styleName == 'Bold'),
+        is_italic=is_italic
+    )
+    ufo.info.familyName = family_name
+    ufo.info.styleName = styleName
+    ufo.info.styleMapFamilyName = styleMapFamilyName
+    ufo.info.styleMapStyleName = styleMapStyleName
+
+
 def build_stylemap_names(family_name, style_name, is_bold=False,
                          is_italic=False, linked_style=None):
     """Build UFO `styleMapFamilyName` and `styleMapStyleName` based on the
